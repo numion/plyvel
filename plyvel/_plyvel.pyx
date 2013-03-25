@@ -108,7 +108,11 @@ cdef bytes to_file_system_name(name):
         raise TypeError(
             "'name' arg must be a byte string or a unicode string")
 
-    encoding = sys.getfilesystemencoding() or 'ascii'
+    if sys.platform == 'win32':
+        # the leveldb windows port requires utf-8
+        encoding = 'utf-8'
+    else:
+        encoding = sys.getfilesystemencoding() or 'ascii'
     try:
         return name.encode(encoding)
     except UnicodeEncodeError as exc:

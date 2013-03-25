@@ -3,6 +3,7 @@
 from __future__ import unicode_literals
 
 from contextlib import contextmanager
+import errno
 import os
 import shutil
 import stat
@@ -63,7 +64,7 @@ def setup():
     try:
         os.mkdir(TEST_DB_DIR)
     except OSError as exc:
-        if exc.errno == 17:
+        if exc.errno == errno.EEXIST:
             # Directory already exists; ignore
             pass
         else:
@@ -74,7 +75,7 @@ def teardown():
     try:
         os.rmdir(TEST_DB_DIR)
     except OSError as exc:
-        if exc.errno == 39:
+        if exc.errno == errno.ENOTEMPTY:
             # Directory not empty; some tests failed
             pass
         else:
@@ -94,8 +95,10 @@ def test_open():
     with tmp_db('read_only_dir', create=False) as name:
         # Opening a DB in a read-only dir should not work
         os.chmod(name, stat.S_IRUSR | stat.S_IXUSR)
-        with assert_raises(plyvel.IOError):
+        # raises IOError on Linux, InvalidArgument on Windows
+        with assert_raises(plyvel.Error):
             DB(name)
+        os.chmod(name, stat.S_IRUSR | stat.S_IXUSR | stat.S_IWRITE)
 
     with tmp_db('úñîçøđê_name') as db:
         pass
@@ -825,6 +828,7 @@ def test_approximate_sizes():
             (b'', b'\xff'),
         ]
         assert_equal(len(ranges), len(db.approximate_sizes(*ranges)))
+        db.close()
 
 
 def test_repair_db():
@@ -837,6 +841,7 @@ def test_repair_db():
         plyvel.repair_db(name)
         db = DB(name)
         assert_equal(b'bar', db.get(b'foo'))
+        db.close()
 
 
 def test_destroy_db():
@@ -953,6 +958,8 @@ def test_comparator():
         assert_list_equal(
             sorted(keys, key=lambda s: s.lower()),
             list(db.iterator(include_value=False)))
+        
+        db.close()
 
 
 def test_prefixed_db():

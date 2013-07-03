@@ -7,6 +7,7 @@ import errno
 import os
 import shutil
 import stat
+import sys
 import tempfile
 
 try:
@@ -21,6 +22,7 @@ except NameError:
     # Python 3
     xrange = range
 
+from nose.plugins.skip import SkipTest
 from nose.tools import (
     assert_equal,
     assert_greater_equal,
@@ -35,7 +37,7 @@ from nose.tools import (
 import plyvel
 from plyvel import DB
 
-TEST_DB_DIR = 'testdb/'
+TEST_DBS_DIR = 'testdb/'
 
 
 #
@@ -44,7 +46,7 @@ TEST_DB_DIR = 'testdb/'
 
 @contextmanager
 def tmp_db(name_prefix, create=True, delete=True):
-    name = tempfile.mkdtemp(prefix=name_prefix + '-', dir=TEST_DB_DIR)
+    name = tempfile.mkdtemp(prefix=name_prefix + '-', dir=TEST_DBS_DIR)
     if create:
         db = DB(name, create_if_missing=True, error_if_exists=True)
         yield db
@@ -62,7 +64,7 @@ def tmp_db(name_prefix, create=True, delete=True):
 
 def setup():
     try:
-        os.mkdir(TEST_DB_DIR)
+        os.mkdir(TEST_DBS_DIR)
     except OSError as exc:
         if exc.errno == errno.EEXIST:
             # Directory already exists; ignore
@@ -73,7 +75,7 @@ def setup():
 
 def teardown():
     try:
-        os.rmdir(TEST_DB_DIR)
+        os.rmdir(TEST_DBS_DIR)
     except OSError as exc:
         if exc.errno == errno.ENOTEMPTY:
             # Directory not empty; some tests failed
@@ -99,9 +101,6 @@ def test_open():
         with assert_raises(plyvel.Error):
             DB(name)
         os.chmod(name, stat.S_IRUSR | stat.S_IXUSR | stat.S_IWRITE)
-
-    with tmp_db('úñîçøđê_name') as db:
-        pass
 
     with tmp_db('no_create', create=False) as name:
         with assert_raises(plyvel.Error):
@@ -135,6 +134,15 @@ def test_open():
            max_open_files=512, lru_cache_size=64 * 1024 * 1024,
            block_size=2 * 1024, block_restart_interval=32,
            compression='snappy', bloom_filter_bits=10)
+
+
+def test_open_unicode_name():
+    if sys.getfilesystemencoding().lower() != 'utf-8':
+        # XXX: letter casing differs between Python 2 and 3
+        raise SkipTest("Not running with UTF-8 file system encoding")
+
+    with tmp_db('úñîçøđê_name'):
+        pass
 
 
 def test_open_close():
@@ -188,8 +196,8 @@ def test_put():
         db.put(b'foo', b'bar', sync=True)
 
         for i in xrange(1000):
-            key = ('key-%d' % i).encode('UTF-8')
-            value = ('value-%d' % i).encode('UTF-8')
+            key = ('key-%d' % i).encode('ascii')
+            value = ('value-%d' % i).encode('ascii')
             db.put(key, value)
 
         assert_raises(TypeError, db.put, b'foo', 12)
@@ -210,11 +218,16 @@ def test_get():
         assert_equal(value, db.get(key, fill_cache=False,
                                    verify_checksums=None))
 
-        assert_is_none(db.get(b'key-that-does-not-exist'))
+        key2 = b'key-that-does-not-exist'
+        value2 = b'default-value'
+        assert_is_none(db.get(key2))
+        assert_equal(value2, db.get(key2, value2))
+        assert_equal(value2, db.get(key2, default=value2))
+
         assert_raises(TypeError, db.get, 1)
-        assert_raises(TypeError, db.get, 'foo')
+        assert_raises(TypeError, db.get, 'key')
         assert_raises(TypeError, db.get, None)
-        assert_raises(TypeError, db.get, b'foo', True)
+        assert_raises(TypeError, db.get, b'foo', b'default', True)
 
 
 def test_delete():
@@ -246,7 +259,7 @@ def test_write_batch():
         # Prepare a batch with some data
         batch = db.write_batch()
         for i in xrange(1000):
-            batch.put(('batch-key-%d' % i).encode('UTF-8'), b'value')
+            batch.put(('batch-key-%d' % i).encode('ascii'), b'value')
 
         # Delete a key that was also set in the same (pending) batch
         batch.delete(b'batch-key-2')
@@ -305,8 +318,8 @@ def test_iteration():
         entries = []
         for i in xrange(100):
             entry = (
-                ('%03d' % i).encode('UTF-8'),
-                ('%03d' % i).encode('UTF-8'))
+                ('%03d' % i).encode('ascii'),
+                ('%03d' % i).encode('ascii'))
             entries.append(entry)
 
         for k, v in entries:
@@ -537,6 +550,12 @@ def test_out_of_range_iterations():
         t(b'5431', stop=b'6', reverse=True)
         t(b'5431', stop=b'6', include_stop=True, reverse=True)
 
+        # Out of range prefix
+        t(b'', prefix=b'0', include_start=True)
+        t(b'', prefix=b'0', include_start=False)
+        t(b'', prefix=b'8', include_stop=True, reverse=True)
+        t(b'', prefix=b'8', include_stop=False, reverse=True)
+
 
 def test_range_empty_database():
     with tmp_db('range_empty_database') as db:
@@ -747,6 +766,8 @@ def test_snapshot():
         db.delete(b'a')
         db.put(b'c', b'c')
         assert_is_none(snapshot.get(b'c'))
+        assert_equal(b'd', snapshot.get(b'c', b'd'))
+        assert_equal(b'd', snapshot.get(b'c', default=b'd'))
         assert_list_equal(
             [b'a', b'b'],
             list(snapshot.iterator(include_value=False)))
@@ -982,6 +1003,8 @@ def test_prefixed_db():
         assert_equal(b'foo', db_a.get(key))
         db_a.delete(key)
         assert_is_none(db_a.get(key))
+        assert_equal(b'v', db_a.get(key, b'v'))
+        assert_equal(b'v', db_a.get(key, default=b'v'))
         db_a.put(key, b'foo')
         assert_equal(b'foo', db.get(b'a123'))
 
@@ -1008,6 +1031,8 @@ def test_prefixed_db():
         db_a.put(b'042', b'new')
         assert_equal(b'', sn_a.get(b'042'))
         assert_equal(b'new', db_a.get(b'042'))
+        assert_equal(b'x', db_a.get(b'foo', b'x'))
+        assert_equal(b'x', db_a.get(b'foo', default=b'x'))
 
         # Snapshot iterators
         sn_a.iterator()

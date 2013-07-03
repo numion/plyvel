@@ -85,7 +85,7 @@ cdef int raise_for_status(Status st) except -1:
 # Utilities
 #
 
-cdef inline db_get(DB db, bytes key, ReadOptions read_options):
+cdef inline db_get(DB db, bytes key, object default, ReadOptions read_options):
     cdef string value
     cdef Status st
     cdef Slice key_slice = Slice(key, len(key))
@@ -94,7 +94,7 @@ cdef inline db_get(DB db, bytes key, ReadOptions read_options):
         st = db._db.Get(read_options, key_slice, &value)
 
     if st.IsNotFound():
-        return None
+        return default
     raise_for_status(st)
 
     return value
@@ -284,7 +284,8 @@ cdef class DB:
     def __dealloc__(self):
         self.close()
 
-    def get(self, bytes key, *, verify_checksums=None, fill_cache=None):
+    def get(self, bytes key, default=None, *, verify_checksums=None,
+            fill_cache=None):
         if self._db is NULL:
             raise RuntimeError("Cannot operate on closed LevelDB database")
 
@@ -295,7 +296,7 @@ cdef class DB:
         if fill_cache is not None:
             read_options.fill_cache = fill_cache
 
-        return db_get(self, key, read_options)
+        return db_get(self, key, default, read_options)
 
     def put(self, bytes key, bytes value, *, sync=None):
         if self._db is NULL:
@@ -430,9 +431,11 @@ cdef class PrefixedDB:
         self.db = db
         self.prefix = prefix
 
-    def get(self, bytes key, *, verify_checksums=None, fill_cache=None):
+    def get(self, bytes key, default=None, *, verify_checksums=None,
+            fill_cache=None):
         return self.db.get(
             self.prefix + key,
+            default=default,
             verify_checksums=verify_checksums,
             fill_cache=fill_cache)
 
@@ -842,8 +845,9 @@ cdef class Iterator:
 
                 if self._iter.Valid():
                     # Move one step back if stop is exclusive.
-                    if self._iter.Valid() and not self.include_stop:
-                        self._iter.Prev()
+                    if not self.include_stop:
+                        with nogil:
+                            self._iter.Prev()
                 else:
                     # Stop key did not exist; position at the last
                     # database entry instead.
@@ -852,10 +856,17 @@ cdef class Iterator:
 
                 # Make sure the iterator is not past the stop key
                 if self._iter.Valid() and self.comparator.Compare(self._iter.key(), self.stop_slice) > 0:
-                    self._iter.Prev()
+                    with nogil:
+                        self._iter.Prev()
 
             if not self._iter.Valid():
                 # No entries left
+                raise StopIteration
+
+            # After all the stepping back, we might even have ended up
+            # *before* the start key. In this case the iterator does not
+            # yield any items.
+            if self.start is not None and self.comparator.Compare(self.start_slice, self._iter.key()) >= 0:
                 raise StopIteration
 
             raise_for_status(self._iter.status())
@@ -950,7 +961,8 @@ cdef class Snapshot:
             if self.db._db is not NULL and self._snapshot is not NULL:
                 self.db._db.ReleaseSnapshot(self._snapshot)
 
-    def get(self, bytes key, *, verify_checksums=None, fill_cache=None):
+    def get(self, bytes key, default=None, *, verify_checksums=None,
+            fill_cache=None):
         if self.db._db is NULL:
             raise RuntimeError("Cannot operate on closed LevelDB database")
 
@@ -964,7 +976,7 @@ cdef class Snapshot:
         if self.prefix is not None:
             key = self.prefix + key
 
-        return db_get(self.db, key, read_options)
+        return db_get(self.db, key, default, read_options)
 
     def __iter__(self):
         if self.db._db is NULL:

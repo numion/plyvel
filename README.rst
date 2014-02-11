@@ -1,3 +1,4 @@
+======
 Plyvel
 ======
 
@@ -14,3 +15,11 @@ See the documentation and project page for more information:
 .. _Documentation: https://plyvel.readthedocs.org/
 .. _PyPI page: http://pypi.python.org/pypi/plyvel/
 .. _LevelDB: http://code.google.com/p/leveldb/
+
+Note that using a released version is recommended over a checkout from version
+control. See the installation docs for more information.
+
+
+.. image:: https://d2weczhvl823v0.cloudfront.net/wbolster/plyvel/trend.png
+   :alt: Bitdeli badge
+   :target: https://bitdeli.com/free

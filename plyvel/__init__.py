@@ -3,7 +3,7 @@ Plyvel, a fast and feature-rich Python interface to LevelDB.
 """
 
 # Only import the symbols that are part of the public API
-from ._plyvel import (
+from ._plyvel import (  # noqa
     __leveldb_version__,
     DB,
     repair_db,
@@ -11,6 +11,7 @@ from ._plyvel import (
     Error,
     IOError,
     CorruptionError,
+    IteratorInvalidError,
 )
 
-from ._version import __version__
+from ._version import __version__  # noqa

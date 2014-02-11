@@ -27,9 +27,9 @@ LevelDB database.
 
       Open the underlying database handle.
 
-      Most of the arguments have the same name as the the corresponding LevelDB
-      parameters; see the LevelDB documentation for details about the exact
-      meaning. Argument that can be `None` are only propagated to LevelDB if
+      Most arguments have the same name as the the corresponding LevelDB
+      parameters; see the LevelDB documentation for a detailed description.
+      Arguments defaulting to `None` are only propagated to LevelDB if
       specified, e.g. not specifying a `write_buffer_size` means the LevelDB
       defaults are used.
 
@@ -65,8 +65,10 @@ LevelDB database.
       Close the database.
 
       This closes the database and releases associated resources such as open
-      file pointers and caches. Any further operations on the closed database
-      will raise a :py:exc:`RuntimeError`.
+      file pointers and caches.
+
+      Any further operations on the closed database will raise
+      :py:exc:`RuntimeError`.
 
       .. warning::
 
@@ -87,7 +89,7 @@ LevelDB database.
       Boolean attribute indicating whether the database is closed.
 
 
-   .. py:method:: get(key, default=None, verify_checksums=None, fill_cache=None)
+   .. py:method:: get(key, default=None, verify_checksums=False, fill_cache=True)
 
       Get the value for the specified key, or `default` if no value was set.
 
@@ -105,7 +107,7 @@ LevelDB database.
       :rtype: bytes
 
 
-   .. py:method:: put(key, value, sync=None)
+   .. py:method:: put(key, value, sync=False)
 
       Set a value for the specified key.
 
@@ -117,7 +119,7 @@ LevelDB database.
       :param bool sync: whether to use synchronous writes
 
 
-   .. method:: delete(key, sync=None)
+   .. method:: delete(key, sync=False)
 
       Delete the key/value pair for the specified key.
 
@@ -128,7 +130,7 @@ LevelDB database.
       :param bool sync: whether to use synchronous writes
 
 
-   .. py:method:: write_batch(transaction=False, sync=None)
+   .. py:method:: write_batch(transaction=False, sync=False)
 
       Create a new :py:class:`WriteBatch` instance for this database.
 
@@ -144,7 +146,7 @@ LevelDB database.
       :rtype: :py:class:`WriteBatch`
 
 
-   .. py:method:: iterator(reverse=False, start=None, stop=None, include_start=True, include_stop=False, prefix=None, include_key=True, include_value=True, verify_checksums=None, fill_cache=None)
+   .. py:method:: iterator(reverse=False, start=None, stop=None, include_start=True, include_stop=False, prefix=None, include_key=True, include_value=True, verify_checksums=False, fill_cache=True)
 
       Create a new :py:class:`Iterator` instance for this database.
 
@@ -174,6 +176,13 @@ LevelDB database.
       :param bool fill_cache: whether to fill the cache
       :return: new :py:class:`Iterator` instance
       :rtype: :py:class:`Iterator`
+
+
+   .. py:method:: raw_iterator(verify_checksums=False, fill_cache=True)
+
+      Create a new :py:class:`RawIterator` instance for this database.
+
+      See the :py:class:`RawIterator` API for more information.
 
 
    .. py:method:: snapshot()
@@ -423,8 +432,34 @@ Snapshot
       Same as :py:meth:`DB.iterator`, but operates on the snapshot instead.
 
 
+   .. py:method:: raw_iterator(...)
+
+      Create a new :py:class:`RawIterator` instance for this snapshot.
+
+      Same as :py:meth:`DB.raw_iterator`, but operates on the snapshot instead.
+
+
+   .. py:method:: close()
+
+      Close the snapshot. Can also be accomplished using a context manager. See
+      :py:meth:`Iterator.close` for an example.
+
+      .. versionadded:: 0.8
+
+
+   .. py:method:: release()
+
+      Alias for :py:meth:`Snapshot.close`. *Release* is the terminology used in
+      the LevelDB C++ API.
+
+      .. versionadded:: 0.8
+
+
 Iterator
 ========
+
+Regular iterators
+-----------------
 
 Plyvel's :py:class:`Iterator` is intended to be used like a normal Python
 iterator, so you can just use a standard ``for`` loop to iterate over it.
@@ -475,16 +510,97 @@ Directly invoking methods on the :py:class:`Iterator` returned by
 
       Move the iterator to the specified `target`.
 
-      This moves the iterator to the the first key that sorts equal or before
+      This moves the iterator to the the first key that sorts equal or after
       the specified `target` within the iterator range (`start` and `stop`).
+
+   .. py:method:: close()
+
+      Close the iterator.
+
+      This closes the iterator and releases the associated resources. Any
+      further operations on the closed iterator will raise
+      :py:exc:`RuntimeError`.
+
+      To automatically close an iterator, a context manager can be used::
+
+          with db.iterator() as it:
+              for k, v in it:
+                  pass  # do something
+
+          it.seek_to_start()  # raises RuntimeError
+
+      .. versionadded:: 0.6
+
+Raw iterators
+-------------
+
+The raw iteration API mimics the C++ iterator interface provided by LevelDB.
+See the LevelDB documentation for a detailed description.
+
+.. py:class:: RawIterator
+
+   Raw iterator to iterate over a database
+
+   .. versionadded:: 0.7
+
+   .. py:method:: valid()
+
+      Check whether the iterator is currently valid.
+
+   .. py:method:: seek_to_first()
+
+      Seek to the first key (if any).
+
+   .. py:method:: seek_to_last()
+
+      Seek to the last key (if any).
+
+   .. py:method:: seek(target)
+
+      Seek to or past the specified key (if any).
+
+   .. py:method:: next()
+
+      Move the iterator one step forward.
+
+      May raise :py:exc:`IteratorInvalidError`.
+
+   .. py:method:: prev()
+
+      Move the iterator one step backward.
+
+      May raise :py:exc:`IteratorInvalidError`.
+
+   .. py:method:: key()
+
+      Return the current key.
+
+      May raise :py:exc:`IteratorInvalidError`.
+
+   .. py:method:: value()
+
+      Return the current value.
+
+      May raise :py:exc:`IteratorInvalidError`.
+
+   .. py:method:: item()
+
+      Return the current key and value as a tuple.
+
+      May raise :py:exc:`IteratorInvalidError`.
+
+   .. py:method:: close()
+
+      Close the iterator. Can also be accomplished using a context manager.
+      See :py:meth:`Iterator.close`.
 
 
 Errors
 ======
 
-Plyvel uses standard exceptions like ``TypeError`` and ``ValueError`` as much as
-possible. For LevelDB specific errors, Plyvel may raise a few custom exceptions:
-:py:class:`Error`, :py:class:`IOError`, and :py:class:`CorruptionError`.
+Plyvel uses standard exceptions like ``TypeError``, ``ValueError``, and
+``RuntimeError`` as much as possible. For LevelDB specific errors, Plyvel may
+raise a few custom exceptions, which are described below.
 
 .. py:exception:: Error
 
@@ -506,6 +622,11 @@ possible. For LevelDB specific errors, Plyvel may raise a few custom exceptions:
 .. py:exception:: CorruptionError
 
    LevelDB corruption error
+
+
+.. py:exception:: IteratorInvalidError
+
+   Used by :py:class:`RawIterator` to signal invalid iterator state.
 
 
 .. vim: set tabstop=3 shiftwidth=3:

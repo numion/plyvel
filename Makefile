@@ -8,7 +8,8 @@ ext:
 	@echo "Building extension"
 	@echo "=================="
 	@echo
-	cython --cplus --fast-fail plyvel/_plyvel.pyx
+	cython --version
+	cython --cplus --fast-fail --annotate plyvel/_plyvel.pyx
 	python setup.py build_ext --inplace --force
 
 doc:
@@ -39,4 +40,4 @@ test: ext
 	@echo "Running tests"
 	@echo "============="
 	@echo
-	python $$(which nosetests) -v $(TESTS)
+	py.test

@@ -196,10 +196,18 @@ since the snapshot prevents LevelDB from cleaning up old data that is still
 accessible by the snapshot. This means that you should never keep a snapshot
 around longer than necessary. The snapshot and its associated resources will be
 released automatically when the snapshot reference count drops to zero, which
-(for local variables) happens when the variable goes out of scope. In long
-running functions, you can also clean it up yourself::
+(for local variables) happens when the variable goes out of scope (or after
+you've issued a ``del`` statement). If you want explicit control over the
+lifetime of a snapshot, you can also clean it up yourself using
+:py:meth:`Snapshot.close`::
 
-    >>> del sn
+    >>> sn.close()
+
+Alternatively, you can use the snapshot as a context manager:
+
+    >>> with db.snapshot() as sn:
+    ...     sn.get(b'key')
+
 
 Iterators
 =========
@@ -325,8 +333,28 @@ iterating over snapshots using the :py:meth:`Snapshot.iterator` method. This
 method works exactly the same as :py:meth:`DB.iterator`, except that it operates
 on the snapshot instead of the complete database.
 
-Advanced iterator usage
------------------------
+Closing iterators
+-----------------
+
+It is generally not required to close an iterator explicitly, since it will be
+closed when it goes out of scope (or is garbage collected). However, due to the
+way LevelDB is designed, each iterator operates on an implicit database
+snapshot, which can be an expensive resource depending on how the database is
+used during the iterator's lifetime. The :py:meth:`Iterator.close` method gives
+explicit control over when those resources are released::
+
+    >>> it = db.iterator()
+    >>> it.close()
+
+Alternatively, to ensure that an iterator is immediately closed after use, you
+can also use it as a context manager using the ``with`` statement::
+
+    >>> with db.iterator() as it:
+    ...    for k, v in it:
+    ...        pass
+
+Non-linear iteration
+--------------------
 
 In the examples above, we've only used Python's standard iteration methods using
 a ``for`` loop and the :py:func:`list` constructor. This suffices for most
@@ -367,8 +395,27 @@ Note that for reverse iterators, the definition of 'forward' and 'backward' is
 inverted, i.e. calling ``next(it)`` on a reverse iterator will return the key
 that sorts *before* the key that was most recently returned.
 
-Additionally, Plyvel supports seeking on iterators. See the :py:class:`Iterator`
-API reference for more information about advanced iterator usage.
+Additionally, Plyvel supports seeking on iterators::
+
+    >>> it = db.iterator(include_value=False)
+    >>> it.seek(b'key-3')
+    >>> next(it)
+    'key-3'
+    >>> it.seek_to_start()
+    >>> next(it)
+    'key-1'
+
+See the :py:class:`Iterator` API reference for more information about advanced
+iterator usage.
+
+Raw iterators
+-------------
+
+In addition to the iterators describe above, which adhere to the Python iterator
+protocol, there is also a *raw iterator* API that mimics the C++ iterator API
+provided by LevelDB. Since this interface is only intended for advanced use
+cases, it is not covered in this user guide. See the API reference for
+:py:meth:`DB.raw_iterator` and :py:class:`RawIterator` for more information.
 
 
 Prefixed databases

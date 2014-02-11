@@ -2,6 +2,67 @@
 Version history
 ===============
 
+Plyvel 0.8
+==========
+
+Release date: 2013-11-29
+
+* Allow snapshots to be closed explicitly using either
+  :py:meth:`Snapshot.close()` or a ``with`` block (`issue #21
+  <https://github.com/wbolster/plyvel/issues/21>`_)
+
+
+Plyvel 0.7
+==========
+
+Release date: 2013-11-15
+
+* New raw iterator API that mimics the LevelDB C++ interface. See
+  :py:meth:`DB.raw_iterator()` and :py:class:`RawIterator`. (`issue #17
+  <https://github.com/wbolster/plyvel/issues/17>`_)
+
+* Migrate to `pytest` and `tox` for testing (`issue #24
+  <https://github.com/wbolster/plyvel/issues/24>`_)
+
+* Performance improvements in iterator and write batch construction. The
+  internal calls within Plyvel are now a bit faster, and the `weakref` handling
+  required for iterators is now a lot faster due to replacing
+  :py:class:`weakref.WeakValueDictionary` with manual `weakref` handling.
+
+* The `fill_cache`, `verify_checksums`, and `sync` arguments to various methods
+  are now correctly taken into account everywhere, and their default values are
+  now booleans reflecting the the LevelDB defaults.
+
+
+Plyvel 0.6
+==========
+
+Release date: 2013-10-18
+
+* Allow iterators to be closed explicitly using either
+  :py:meth:`Iterator.close()` or a ``with`` block (`issue #19
+  <https://github.com/wbolster/plyvel/issues/19>`_)
+
+* Add useful ``__repr__()`` for :py:class:`DB` and :py:class:`PrefixedDB`
+  instances (`issue #16 <https://github.com/wbolster/plyvel/issues/16>`_)
+
+
+Plyvel 0.5
+==========
+
+Release date: 2013-09-17
+
+* Fix :py:meth:`Iterator.seek()` for :py:class:`PrefixedDB` iterators
+  (`issue #15 <https://github.com/wbolster/plyvel/issues/15>`_)
+
+* Make some argument type checking a bit stricter (mostly ``None`` checks)
+
+* Support LRU caches larger than 2GB by using the right integer type for the
+  ``lru_cache_size`` :py:class:`DB` constructor argument.
+
+* Documentation improvements
+
+
 Plyvel 0.4
 ==========
 

@@ -18,17 +18,18 @@ Use plyvel.DB() to create or open a database.
 
 import sys
 import threading
-import weakref
+from weakref import ref as weakref_ref
 
 cimport cython
 
+from cpython cimport bool
 from libc.stdint cimport uint64_t
 from libc.stdlib cimport malloc, free
 from libcpp.string cimport string
-from libcpp cimport bool
+from libcpp cimport bool as c_bool
 
-cimport leveldb
-from leveldb cimport (
+cimport plyvel.leveldb as leveldb
+from plyvel.leveldb cimport (
     BytewiseComparator,
     Cache,
     Comparator,
@@ -44,7 +45,7 @@ from leveldb cimport (
     WriteOptions,
 )
 
-from comparator cimport NewPlyvelCallbackComparator
+from plyvel.comparator cimport NewPlyvelCallbackComparator
 
 
 __leveldb_version__ = '%d.%d' % (leveldb.kMajorVersion,
@@ -64,6 +65,10 @@ class IOError(Error, IOError):
 
 
 class CorruptionError(Error):
+    pass
+
+
+class IteratorInvalidError(Error):
     pass
 
 
@@ -141,14 +146,14 @@ cdef bytes bytes_increment(bytes s):
     return None
 
 
-cdef int parse_options(Options *options, bool create_if_missing,
-                       bool error_if_exists, object paranoid_checks,
+cdef int parse_options(Options *options, c_bool create_if_missing,
+                       c_bool error_if_exists, object paranoid_checks,
                        object write_buffer_size, object max_open_files,
                        object lru_cache_size, object block_size,
                        object block_restart_interval, object compression,
                        int bloom_filter_bits, object comparator,
                        bytes comparator_name) except -1:
-    cdef int c_lru_cache_size
+    cdef size_t c_lru_cache_size
 
     options.create_if_missing = create_if_missing
     options.error_if_exists = error_if_exists
@@ -209,8 +214,9 @@ cdef int parse_options(Options *options, bool create_if_missing,
 cdef class DB:
     cdef leveldb.DB* _db
     cdef Options options
+    cdef object name
     cdef object lock
-    cdef object iterators
+    cdef dict iterators
 
     def __init__(self, name, *, bool create_if_missing=False,
                  bool error_if_exists=False, paranoid_checks=None,
@@ -221,6 +227,7 @@ cdef class DB:
                  bytes comparator_name=None):
         cdef Status st
         cdef string fsname
+        self.name = name
 
         fsname = to_file_system_name(name)
         parse_options(
@@ -235,29 +242,22 @@ cdef class DB:
         # Keep weak references to open iterators, since deleting a C++
         # DB instance results in a segfault if associated Iterator
         # instances are not deleted beforehand (as mentioned in
-        # leveldb/db.h). We don't use weakref.WeakSet here because it's
-        # only available since Python 2.7. Instead we'll just use the
-        # object's id() as the key.
+        # leveldb/db.h). We don't use weakref.WeakValueDictionary here
+        # for performance reasons.
         self.lock = threading.Lock()
-        self.iterators = weakref.WeakValueDictionary()
+        self.iterators = dict()
 
     cpdef close(self):
         # If the constructor raised an exception (and hence never
         # completed), self.iterators can be None. In that case no
-        # iterators need to be cleaned, since the database has never
-        # produced any used.
-        cdef Iterator iterator
+        # iterators need to be cleaned anyway.
+        cdef BaseIterator iterator
         if self.iterators is not None:
             with self.lock:
-                try:
-                    itervalues = self.iterators.itervalues  # Python 2
-                except AttributeError:
-                    itervalues = self.iterators.values  # Python 3
-
-                for iterator in itervalues():
-                    iterator.close()
-
-                self.iterators.clear()
+                while self.iterators:
+                    iterator = self.iterators.popitem()[1]()
+                    if iterator is not None:
+                        iterator.close()
 
         if self._db is not NULL:
             del self._db
@@ -284,88 +284,103 @@ cdef class DB:
     def __dealloc__(self):
         self.close()
 
-    def get(self, bytes key, default=None, *, verify_checksums=None,
-            fill_cache=None):
+    def __repr__(self):
+        return '<plyvel.DB with name %r%s at 0x%s>' % (
+            self.name,
+            ' (closed)' if self.closed else '',
+            hex(id(self)),
+        )
+
+    def get(self, bytes key not None, default=None, *,
+            bool verify_checksums=False, bool fill_cache=True):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         cdef ReadOptions read_options
-
-        if verify_checksums is not None:
-            read_options.verify_checksums = verify_checksums
-        if fill_cache is not None:
-            read_options.fill_cache = fill_cache
+        read_options.verify_checksums = verify_checksums
+        read_options.fill_cache = fill_cache
 
         return db_get(self, key, default, read_options)
 
-    def put(self, bytes key, bytes value, *, sync=None):
+    def put(self, bytes key not None, bytes value not None, *,
+            bool sync=False):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         cdef WriteOptions write_options = WriteOptions()
+        write_options.sync = sync
+
         cdef Slice key_slice = Slice(key, len(key))
         cdef Slice value_slice = Slice(value, len(value))
         cdef Status st
-
-        if sync is not None:
-            write_options.sync = sync
 
         with nogil:
             st = self._db.Put(write_options, key_slice, value_slice)
         raise_for_status(st)
 
-    def delete(self, bytes key, *, sync=None):
+    def delete(self, bytes key not None, *, bool sync=False):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         cdef Status st
-        cdef WriteOptions write_options = WriteOptions()
-
-        if sync is not None:
-            write_options.sync = sync
+        cdef WriteOptions write_options
+        write_options.sync = sync
 
         cdef Slice key_slice = Slice(key, len(key))
         with nogil:
             st = self._db.Delete(write_options, key_slice)
         raise_for_status(st)
 
-    def write_batch(self, *, transaction=False, sync=None):
+    def write_batch(self, *, bool transaction=False, bool sync=False):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
-        return WriteBatch(db=self, transaction=transaction, sync=sync)
+        return WriteBatch(self, None, transaction, sync)
 
     def __iter__(self):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         return self.iterator()
 
     def iterator(self, *, reverse=False, start=None, stop=None,
                  include_start=True, include_stop=False, prefix=None,
-                 include_key=True, include_value=True, verify_checksums=None,
-                 fill_cache=None):
+                 include_key=True, include_value=True,
+                 bool verify_checksums=False, bool fill_cache=True):
         return Iterator(
-            db=self, key_prefix=None, reverse=reverse, start=start, stop=stop,
-            include_start=include_start, include_stop=include_stop,
-            prefix=prefix, include_key=include_key,
-            include_value=include_value, verify_checksums=verify_checksums,
-            fill_cache=fill_cache, snapshot=None)
+            self,  # db
+            None,  # db_prefix
+            reverse,
+            start,
+            stop,
+            include_start,
+            include_stop,
+            prefix,
+            include_key,
+            include_value,
+            verify_checksums,
+            fill_cache,
+            None,  # snapshot
+        )
 
-    cdef _register_iterator(self, Iterator iterator):
-        # Store a weak reference to an iterator (needed when closing DB)
-        self.iterators[id(iterator)] = iterator
+    def raw_iterator(self, *, bool verify_checksums=False, bool fill_cache=True):
+        return RawIterator(
+            self,  # db
+            verify_checksums,
+            fill_cache,
+            None,  # snapshot
+        )
 
     def snapshot(self):
         return Snapshot(db=self)
 
     def get_property(self, bytes name not None):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         cdef Slice sl = Slice(name, len(name))
         cdef string value
-        cdef bool result
+        cdef c_bool result
 
         with nogil:
             result = self._db.GetProperty(sl, &value)
@@ -374,7 +389,7 @@ cdef class DB:
 
     def compact_range(self, *, bytes start=None, bytes stop=None):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         cdef Slice start_slice
         cdef Slice stop_slice
@@ -390,13 +405,13 @@ cdef class DB:
 
     def approximate_size(self, bytes start not None, bytes stop not None):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         return self.approximate_sizes((start, stop))[0]
 
     def approximate_sizes(self, *ranges):
         if self._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         cdef int n_ranges = len(ranges)
         cdef Range *c_ranges = <Range *>malloc(n_ranges * sizeof(Range))
@@ -427,41 +442,56 @@ cdef class PrefixedDB:
     cdef readonly DB db
     cdef readonly bytes prefix
 
-    def __init__(self, *, db, prefix):
+    def __init__(self, *, DB db not None, bytes prefix not None):
         self.db = db
         self.prefix = prefix
 
-    def get(self, bytes key, default=None, *, verify_checksums=None,
-            fill_cache=None):
+    def __repr__(self):
+        return '<plyvel.PrefixedDB with prefix %r at 0x%s>' % (
+            self.prefix,
+            hex(id(self)),
+        )
+
+    def get(self, bytes key not None, default=None, *,
+            bool verify_checksums=False, bool fill_cache=True):
         return self.db.get(
             self.prefix + key,
             default=default,
             verify_checksums=verify_checksums,
             fill_cache=fill_cache)
 
-    def put(self, bytes key, bytes value, *, sync=None):
+    def put(self, bytes key not None, bytes value not None, *,
+            bool sync=False):
         return self.db.put(self.prefix + key, value, sync=sync)
 
-    def delete(self, bytes key, *, sync=None):
+    def delete(self, bytes key not None, *, bool sync=False):
         return self.db.delete(self.prefix + key, sync=sync)
 
-    def write_batch(self, *, transaction=False, sync=None):
-        return WriteBatch(
-            db=self.db, prefix=self.prefix, transaction=transaction, sync=sync)
+    def write_batch(self, *, transaction=False, bool sync=False):
+        return WriteBatch(self.db, self.prefix, transaction, sync)
 
     def __iter__(self):
         return self.iterator()
 
     def iterator(self, *, reverse=False, start=None, stop=None,
                  include_start=True, include_stop=False, prefix=None,
-                 include_key=True, include_value=True, verify_checksums=None,
-                 fill_cache=None):
+                 include_key=True, include_value=True,
+                 bool verify_checksums=False, bool fill_cache=True):
         return Iterator(
-            db=self.db, key_prefix=self.prefix, reverse=reverse, start=start,
-            stop=stop, include_start=include_start, include_stop=include_stop,
-            prefix=prefix, include_key=include_key,
-            include_value=include_value, verify_checksums=verify_checksums,
-            fill_cache=fill_cache, snapshot=None)
+            self.db,
+            self.prefix,
+            reverse,
+            start,
+            stop,
+            include_start,
+            include_stop,
+            prefix,
+            include_key,
+            include_value,
+            verify_checksums,
+            fill_cache,
+            None,  # snapshot
+        )
 
     def snapshot(self):
         return Snapshot(db=self.db, prefix=self.prefix)
@@ -513,10 +543,9 @@ cdef class WriteBatch:
     cdef WriteOptions write_options
     cdef DB db
     cdef bytes prefix
-    cdef bool transaction
+    cdef c_bool transaction
 
-    def __init__(self, *, DB db not None, bytes prefix=None,
-                 bool transaction=False, sync=None):
+    def __init__(self, DB db not None, bytes prefix, bool transaction, sync):
         self.db = db
         self.prefix = prefix
         self.transaction = transaction
@@ -530,9 +559,9 @@ cdef class WriteBatch:
     def __dealloc__(self):
         del self._write_batch
 
-    def put(self, bytes key, bytes value):
+    def put(self, bytes key not None, bytes value not None):
         if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         if self.prefix is not None:
             key = self.prefix + key
@@ -542,9 +571,9 @@ cdef class WriteBatch:
         with nogil:
             self._write_batch.Put(key_slice, value_slice)
 
-    def delete(self, bytes key):
+    def delete(self, bytes key not None):
         if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         if self.prefix is not None:
             key = self.prefix + key
@@ -555,14 +584,14 @@ cdef class WriteBatch:
 
     def clear(self):
         if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         with nogil:
             self._write_batch.Clear()
 
     def write(self):
         if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         cdef Status st
         with nogil:
@@ -571,13 +600,13 @@ cdef class WriteBatch:
 
     def __enter__(self):
         if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database is closed")
 
         if self.transaction and exc_type is not None:
             # Exception occurred in transaction; do not write the batch
@@ -604,10 +633,56 @@ cdef enum IteratorDirection:
     REVERSE
 
 
-@cython.final
-cdef class Iterator:
+cdef class BaseIterator:
     cdef DB db
     cdef leveldb.Iterator* _iter
+
+    # Iterators need to be weak referencable to ensure a proper cleanup
+    # from DB.close()
+    cdef object __weakref__
+
+    def __init__(self, DB db, bool verify_checksums, bool fill_cache,
+                 Snapshot snapshot):
+        if db._db is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        self.db = db
+
+        cdef ReadOptions read_options
+        read_options.verify_checksums = verify_checksums
+        read_options.fill_cache = fill_cache
+        if snapshot is not None:
+            read_options.snapshot = snapshot._snapshot
+
+        with nogil:
+            self._iter = db._db.NewIterator(read_options)
+
+        # Store a weak reference on the db (needed when closing db)
+        iterator_id = id(self)
+        ref_dict = db.iterators
+        ref_dict[iterator_id] = weakref_ref(
+            self,
+            lambda wr: ref_dict.pop(iterator_id))
+
+    cpdef close(self):
+        if self._iter is not NULL:
+            del self._iter
+            self._iter = NULL
+
+    def __dealloc__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False  # propagate exceptions
+
+
+
+@cython.final
+cdef class Iterator(BaseIterator):
     cdef IteratorDirection direction
     cdef IteratorState state
     cdef Comparator* comparator
@@ -615,55 +690,53 @@ cdef class Iterator:
     cdef bytes stop
     cdef Slice start_slice
     cdef Slice stop_slice
-    cdef bool include_start
-    cdef bool include_stop
-    cdef bool include_key
-    cdef bool include_value
+    cdef c_bool include_start
+    cdef c_bool include_stop
+    cdef c_bool include_key
+    cdef c_bool include_value
+    cdef bytes db_prefix
+    cdef size_t db_prefix_len
 
-    # This is the number of bytes that should be skipped over when
-    # returning keys from .current(). This avoids Python byte string
-    # copying/slicing overhead for PrefixedDB iterators.
-    cdef int skip_key_bytes
+    def __init__(self, DB db, bytes db_prefix, bool reverse, bytes start,
+                 bytes stop, bool include_start, bool include_stop,
+                 bytes prefix, bool include_key, bool include_value,
+                 bool verify_checksums, bool fill_cache, Snapshot snapshot):
 
-    # Iterators need to be weak referencable to ensure a proper cleanup
-    # from DB.close()
-    cdef object __weakref__
+        super(Iterator, self).__init__(
+            db=db,
+            verify_checksums=verify_checksums,
+            fill_cache=fill_cache,
+            snapshot=snapshot)
 
-    def __init__(self, *, DB db not None, key_prefix, bool reverse,
-                 bytes start, bytes stop, bool include_start,
-                 bool include_stop, bytes prefix, bool include_key,
-                 bool include_value, bool verify_checksums, bool fill_cache,
-                 Snapshot snapshot):
-        if db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
-
-        self.db = db
         self.comparator = <leveldb.Comparator*>db.options.comparator
         self.direction = FORWARD if not reverse else REVERSE
 
-        if key_prefix is None:
-            self.skip_key_bytes = 0
+        if db_prefix is None:
+            self.db_prefix_len = 0
         else:
-            # This is an iterator on a PrefixedDB. Transform args so
-            # that the database key prefix is taken into account.
-            self.skip_key_bytes = len(key_prefix)
+            # This is an iterator on a PrefixedDB.
+            self.db_prefix = db_prefix
+            self.db_prefix_len = len(db_prefix)
+
+            # Transform args so that the database key prefix is taken
+            # into account.
             if prefix is not None:
                 # Both database key prefix and prefix on the iterator
-                prefix = key_prefix + prefix
+                prefix = db_prefix + prefix
             else:
                 # Adapt start and stop keys to use the database key
                 # prefix.
                 if start is None:
-                    start = key_prefix
+                    start = db_prefix
                     include_start = True
                 else:
-                    start = key_prefix + start
+                    start = db_prefix + start
 
                 if stop is None:
-                    stop = bytes_increment(key_prefix)
+                    stop = bytes_increment(db_prefix)
                     include_stop = False
                 else:
-                    stop = key_prefix + stop
+                    stop = db_prefix + stop
 
         if prefix is not None:
             if start is not None or stop is not None:
@@ -689,37 +762,12 @@ cdef class Iterator:
         self.include_key = include_key
         self.include_value = include_value
 
-        cdef ReadOptions read_options
-        if verify_checksums is not None:
-            read_options.verify_checksums = verify_checksums
-        if fill_cache is not None:
-            read_options.fill_cache = fill_cache
-        if snapshot is not None:
-            read_options.snapshot = snapshot._snapshot
-
-        with nogil:
-            self._iter = db._db.NewIterator(read_options)
-
         if self.direction == FORWARD:
             self.seek_to_start()
         else:
             self.seek_to_stop()
 
-        db._register_iterator(self)
         raise_for_status(self._iter.status())
-
-    cdef close(self):
-        # Note: this method is only for internal cleanups and hence not
-        # accessible from Python.
-        if self._iter is NULL:
-            # Already closed
-            return
-
-        del self._iter
-        self._iter = NULL
-
-    def __dealloc__(self):
-        self.close()
 
     def __iter__(self):
         return self
@@ -731,15 +779,15 @@ cdef class Iterator:
         external Python API.
         """
         cdef Slice key_slice
-        cdef bytes key
+        cdef bytes key = None
         cdef Slice value_slice
-        cdef bytes value
-        cdef object out
+        cdef bytes value = None
 
-        # Only build Python strings that will be returned
+        # Only build Python strings that will be returned. Also chop off
+        # the db prefix (for PrefixedDB iterators).
         if self.include_key:
             key_slice = self._iter.key()
-            key = key_slice.data()[self.skip_key_bytes:key_slice.size()]
+            key = key_slice.data()[self.db_prefix_len:key_slice.size()]
 
         if self.include_value:
             value_slice = self._iter.value()
@@ -772,7 +820,7 @@ cdef class Iterator:
 
     cdef real_next(self):
         if self._iter is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database or iterator is closed")
 
         if self.state == IN_BETWEEN:
             with nogil:
@@ -818,7 +866,7 @@ cdef class Iterator:
 
     cdef real_prev(self):
         if self._iter is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database or iterator is closed")
 
         if self.state == IN_BETWEEN:
             pass
@@ -902,19 +950,22 @@ cdef class Iterator:
 
     def seek_to_start(self):
         if self._iter is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database or iterator is closed")
 
         self.state = BEFORE_START
 
     def seek_to_stop(self):
         if self._iter is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database or iterator is closed")
 
         self.state = AFTER_STOP
 
     def seek(self, bytes target not None):
         if self._iter is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+            raise RuntimeError("Database or iterator is closed")
+
+        if self.db_prefix is not None:
+            target = self.db_prefix + target
 
         cdef Slice target_slice = Slice(target, len(target))
 
@@ -937,6 +988,92 @@ cdef class Iterator:
         raise_for_status(self._iter.status())
 
 
+@cython.final
+cdef class RawIterator(BaseIterator):
+    def valid(self):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        return self._iter.Valid()
+
+    def seek_to_first(self):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        with nogil:
+            self._iter.SeekToFirst()
+
+        raise_for_status(self._iter.status())
+
+    def seek_to_last(self):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        with nogil:
+            self._iter.SeekToLast()
+
+        raise_for_status(self._iter.status())
+
+    def seek(self, bytes target not None):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        cdef Slice target_slice = Slice(target, len(target))
+        with nogil:
+            self._iter.Seek(target_slice)
+
+        raise_for_status(self._iter.status())
+
+    def next(self):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        if not self._iter.Valid():
+            raise IteratorInvalidError()
+
+        with nogil:
+            self._iter.Next()
+
+        raise_for_status(self._iter.status())
+
+    def prev(self):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        if not self._iter.Valid():
+            raise IteratorInvalidError()
+
+        with nogil:
+            self._iter.Prev()
+
+        raise_for_status(self._iter.status())
+
+    cpdef key(self):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        if not self._iter.Valid():
+            raise IteratorInvalidError()
+
+        cdef Slice key_slice
+        key_slice = self._iter.key()
+        return key_slice.data()[:key_slice.size()]
+
+    cpdef value(self):
+        if self._iter is NULL:
+            raise RuntimeError("Database or iterator is closed")
+
+        if not self._iter.Valid():
+            raise IteratorInvalidError()
+
+        cdef Slice value_slice
+        value_slice = self._iter.value()
+        return value_slice.data()[:value_slice.size()]
+
+    def item(self):
+        return self.key(), self.value()
+
+
 #
 # Snapshot
 #
@@ -957,21 +1094,35 @@ cdef class Snapshot:
             self._snapshot = <leveldb.Snapshot*>db._db.GetSnapshot()
 
     def __dealloc__(self):
-        with nogil:
-            if self.db._db is not NULL and self._snapshot is not NULL:
-                self.db._db.ReleaseSnapshot(self._snapshot)
+        self.close()
 
-    def get(self, bytes key, default=None, *, verify_checksums=None,
-            fill_cache=None):
-        if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
+    cpdef close(self):
+        if self.db._db is NULL or self._snapshot is NULL:
+            return  # nothing to do
+
+        with nogil:
+            self.db._db.ReleaseSnapshot(self._snapshot)
+            self._snapshot = NULL
+
+    def release(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False  # propagate exceptions
+
+    def get(self, bytes key not None, default=None, *,
+            bool verify_checksums=False, bool fill_cache=True):
+        if self.db._db is NULL or self._snapshot is NULL:
+            raise RuntimeError("Database or snapshot is closed")
 
         cdef ReadOptions read_options
+        read_options.verify_checksums = verify_checksums
+        read_options.fill_cache = fill_cache
         read_options.snapshot = self._snapshot
-        if verify_checksums is not None:
-            read_options.verify_checksums = verify_checksums
-        if fill_cache is not None:
-            read_options.fill_cache = fill_cache
 
         if self.prefix is not None:
             key = self.prefix + key
@@ -979,18 +1130,29 @@ cdef class Snapshot:
         return db_get(self.db, key, default, read_options)
 
     def __iter__(self):
-        if self.db._db is NULL:
-            raise RuntimeError("Cannot operate on closed LevelDB database")
-
         return self.iterator()
 
     def iterator(self, *, reverse=False, start=None, stop=None,
                  include_start=True, include_stop=False, prefix=None,
-                 include_key=True, include_value=True, verify_checksums=None,
-                 fill_cache=None):
+                 include_key=True, include_value=True,
+                 bool verify_checksums=False, bool fill_cache=True):
+        if self.db._db is NULL or self._snapshot is NULL:
+            raise RuntimeError("Database or snapshot is closed")
+
         return Iterator(
-            db=self.db, key_prefix=self.prefix, reverse=reverse, start=start,
+            db=self.db, db_prefix=self.prefix, reverse=reverse, start=start,
             stop=stop, include_start=include_start, include_stop=include_stop,
             prefix=prefix, include_key=include_key,
             include_value=include_value, verify_checksums=verify_checksums,
             fill_cache=fill_cache, snapshot=self)
+
+    def raw_iterator(self, *, bool verify_checksums=False,
+                     bool fill_cache=True):
+        if self.db._db is NULL or self._snapshot is NULL:
+            raise RuntimeError("Database or snapshot is closed")
+
+        return RawIterator(
+            db=self.db,
+            verify_checksums=verify_checksums,
+            fill_cache=fill_cache,
+            snapshot=self)

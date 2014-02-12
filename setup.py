@@ -32,7 +32,7 @@ def leveldb_configure(ext, root):
     if sys.platform == 'win32':
         ext.sources.extend([
             'winleveldb/port/port_win.cc', 'winleveldb/env_win.cc'])
-        ext.include_dirs.extend([join(root, 'port/win'), 'winleveldb'])
+        ext.include_dirs.extend(['winleveldb'])
         ext.libraries = ['Shlwapi', 'Shell32']
         ext.define_macros = [
             ('LEVELDB_PLATFORM_WINDOWS', '1'),

@@ -568,8 +568,7 @@ cdef class WriteBatch:
 
         cdef Slice key_slice = Slice(key, len(key))
         cdef Slice value_slice = Slice(value, len(value))
-        with nogil:
-            self._write_batch.Put(key_slice, value_slice)
+        self._write_batch.Put(key_slice, value_slice)
 
     def delete(self, bytes key not None):
         if self.db._db is NULL:
@@ -579,15 +578,13 @@ cdef class WriteBatch:
             key = self.prefix + key
 
         cdef Slice key_slice = Slice(key, len(key))
-        with nogil:
-            self._write_batch.Delete(key_slice)
+        self._write_batch.Delete(key_slice)
 
     def clear(self):
         if self.db._db is NULL:
             raise RuntimeError("Database is closed")
 
-        with nogil:
-            self._write_batch.Clear()
+        self._write_batch.Clear()
 
     def write(self):
         if self.db._db is NULL:

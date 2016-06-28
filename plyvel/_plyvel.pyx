@@ -26,6 +26,7 @@ from cpython cimport bool
 from libc.stdint cimport uint64_t
 from libc.stdlib cimport malloc, free
 from libcpp.string cimport string
+from libcpp.vector cimport vector
 from libcpp cimport bool as c_bool
 
 cimport plyvel.leveldb as leveldb
@@ -103,6 +104,50 @@ cdef inline db_get(DB db, bytes key, object default, ReadOptions read_options):
     raise_for_status(st)
 
     return value
+
+
+cdef inline db_get_all(DB db, object keys, ReadOptions read_options):
+    cdef bytes key
+    cdef string value
+    cdef string z
+    cdef Status st
+    cdef vector[Slice] c_keys
+    cdef vector[char] c_status
+    cdef vector[string] c_result
+    cdef Py_ssize_t i, n
+    cdef int error
+
+    n = len(keys)
+    c_keys.reserve(n)
+    c_status.reserve(n)
+    for key in keys:
+        if key is None:
+            c_keys.push_back(Slice(z.data(), z.length()))
+            c_status.push_back(0)
+        else:
+            c_keys.push_back(Slice(key, len(key)))
+            c_status.push_back(1)
+    n = c_keys.size()
+    c_result.reserve(n)
+
+    error = 0
+    with nogil:
+        for i in range(n):
+            if c_status[i]:
+                st = db._db.Get(read_options, c_keys[i], &value)
+                if st.IsNotFound():
+                    c_result.push_back(z)
+                    c_status[i] = 0
+                else:
+                    if not st.ok():
+                        error = 1
+                        break
+                    c_result.push_back(value)
+            else:
+                c_result.push_back(z)
+    if error:
+        raise_for_status(st)
+    return [c_result[i] if c_status[i] else None for i in range(n)]
 
 
 cdef bytes to_file_system_name(name):
@@ -302,6 +347,17 @@ cdef class DB:
 
         return db_get(self, key, default, read_options)
 
+    def get_all(self, keys, *,
+            bool verify_checksums=False, bool fill_cache=True):
+        if self._db is NULL:
+            raise RuntimeError("Database is closed")
+
+        cdef ReadOptions read_options
+        read_options.verify_checksums = verify_checksums
+        read_options.fill_cache = fill_cache
+
+        return db_get_all(self, keys, read_options)
+
     def put(self, bytes key not None, bytes value not None, *,
             bool sync=False):
         if self._db is NULL:
@@ -457,6 +513,13 @@ cdef class PrefixedDB:
         return self.db.get(
             self.prefix + key,
             default=default,
+            verify_checksums=verify_checksums,
+            fill_cache=fill_cache)
+
+    def get_all(self, keys, *,
+            bool verify_checksums=False, bool fill_cache=True):
+        return self.db.get_all(
+            [self.prefix + key if key is not None else None for key in keys],
             verify_checksums=verify_checksums,
             fill_cache=fill_cache)
 
@@ -1099,6 +1162,21 @@ cdef class Snapshot:
             key = self.prefix + key
 
         return db_get(self.db, key, default, read_options)
+
+    def get_all(self, keys, *,
+            bool verify_checksums=False, bool fill_cache=True):
+        if self.db._db is NULL or self._snapshot is NULL:
+            raise RuntimeError("Database is closed")
+
+        cdef ReadOptions read_options
+        read_options.verify_checksums = verify_checksums
+        read_options.fill_cache = fill_cache
+        read_options.snapshot = self._snapshot
+
+        if self.prefix is not None:
+            keys = [self.prefix + key if key is not None else None for key in keys]
+
+        return db_get_all(self.db, keys, read_options)
 
     def __iter__(self):
         return self.iterator()

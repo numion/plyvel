@@ -535,7 +535,7 @@ def test_range_iteration_ex(db):
                         ))
                     assert result == expect, (
                         start, include_start, stop, include_stop, result)
-            
+
                     expect.reverse()
                     result = list(db.iterator(start=start, stop=stop,
                         include_start=include_start,
@@ -1166,3 +1166,36 @@ def test_raw_iterator_closing(db):
         with db.raw_iterator() as it:
             pass
         it.valid()
+
+
+def test_get_all(db):
+    for prefix in (b'a', b'b'):
+        for i in range(100):
+            key = prefix + '{0:03d}'.format(i).encode('ascii')
+            db.put(key, key + b'.v')
+
+    db_a = db.prefixed_db(b'a')
+    db_b = db.prefixed_db(b'b')
+    db_b_snapshot = db_b.snapshot()
+
+    assert db.get_all(()) == []
+    assert db_a.get_all(()) == []
+    assert db_b.get_all(()) == []
+    assert db_b_snapshot.get_all(()) == []
+
+    assert db.get_all([None, b'', b'a100', b'b100']) == [None, None, None, None]
+    assert db_a.get_all([None, b'', b'100']) == [None, None, None]
+    assert db_b.get_all([None, b'', b'100']) == [None, None, None]
+    assert db_b_snapshot.get_all([None, b'', b'100']) == [None, None, None]
+
+    r = db.get_all([b'a001', b'b002', b'a003', b'b099'])
+    assert r == [b'a001.v', b'b002.v', b'a003.v', b'b099.v']
+
+    r = db_a.get_all([b'001', b'002', b'003', b'099'])
+    assert r == [b'a001.v', b'a002.v', b'a003.v', b'a099.v']
+
+    r = db_b.get_all([b'001', b'002', b'003', b'099'])
+    assert r == [b'b001.v', b'b002.v', b'b003.v', b'b099.v']
+
+    r = db_b_snapshot.get_all([b'001', b'002', b'003', b'099'])
+    assert r == [b'b001.v', b'b002.v', b'b003.v', b'b099.v']

@@ -22,12 +22,25 @@ public:
     {
         Py_INCREF(comparator);
         zero = PyLong_FromLong(0);
+
+        /* LevelDB uses a background thread for compaction, and with custom
+         * comparators this background thread calls back into Python code,
+         * which means the GIL must be initialized. */
+        PyEval_InitThreads();
     }
 
     ~PlyvelCallbackComparator()
     {
         Py_DECREF(comparator);
         Py_DECREF(zero);
+    }
+
+    void bailout(const char* message) const
+    {
+        PyErr_Print();
+        std::cerr << "FATAL ERROR: " << message << std::endl;
+        std::cerr << "Aborting to avoid database corruption..." << std::endl;
+        abort();
     }
 
     int Compare(const leveldb::Slice& a, const leveldb::Slice& b) const
@@ -45,20 +58,14 @@ public:
         bytes_b = PyBytes_FromStringAndSize(b.data(), b.size());
 
         if ((bytes_a == NULL) || (bytes_b == NULL)) {
-            PyErr_Print();
-            std::cerr << "FATAL ERROR: Plyvel comparator could not allocate byte strings" << std::endl;
-            std::cerr << "Aborting to avoid database corruption..." << std::endl;
-            abort();
+            this->bailout("Plyvel comparator could not allocate byte strings");
         }
 
         /* Invoke comparator callable */
         compare_result = PyObject_CallFunctionObjArgs(comparator, bytes_a, bytes_b, 0);
 
         if (compare_result == NULL) {
-            PyErr_Print();
-            std::cerr << "FATAL ERROR: Exception raised from custom Plyvel comparator" << std::endl;
-            std::cerr << "Aborting to avoid database corruption..." << std::endl;
-            abort();
+            this->bailout("Exception raised from custom Plyvel comparator");
         }
 
         /* The comparator callable can return any Python object. Compare it
@@ -72,10 +79,7 @@ public:
         }
 
         if (PyErr_Occurred()) {
-            PyErr_Print();
-            std::cerr << "FATAL ERROR: Exception raised while comparing custom Plyvel comparator result with 0" << std::endl;
-            std::cerr << "Aborting to avoid database corruption..." << std::endl;
-            abort();
+            this->bailout("Exception raised while comparing custom Plyvel comparator result with 0");
         }
 
         Py_DECREF(compare_result);

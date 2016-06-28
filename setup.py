@@ -79,10 +79,10 @@ if os.path.exists(leveldb_root):
 
 
 setup(
-    name='plyvel',
+    name='numion-plyvel',
     description="Plyvel, a fast and feature-rich Python interface to LevelDB",
     long_description=get_file_contents('README.rst'),
-    url="https://github.com/wbolster/plyvel",
+    url="https://github.com/numion/plyvel",
     version=__version__,
     author="Wouter Bolsterlee",
     author_email="uws@xs4all.nl",
